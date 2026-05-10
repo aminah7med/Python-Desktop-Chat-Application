@@ -6,15 +6,21 @@ import threading
 class ChatServer:
 
     def __init__(self):
-        # Railway injects PORT as an environment variable.
-        # Locally it falls back to 5000.
         self.host = "0.0.0.0"
+
+        # Railway injects PORT as an environment variable.
+        # On Railway the value is always a plain TCP port — Railway's TCP Proxy
+        # terminates TLS/HTTP *outside* our process, so we just bind to this port.
+        # Locally it falls back to 5000.
         self.port = int(os.environ.get("PORT", 5000))
 
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         # Allows quick restart without "Address already in use" error
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # Keep-alive so Railway's idle-connection killer doesn't drop quiet clients
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
         # Thread-safe list of connected client sockets
         self.clients      = []
@@ -26,29 +32,34 @@ class ChatServer:
 
     def start(self):
         self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen()
+        self.server_socket.listen(10)
 
-        print("=" * 40)
+        print("=" * 50)
         print("  Python Chat Server")
-        print("=" * 40)
-        print(f"  Host : {self.host}")
-        print(f"  Port : {self.port}")
-        print("  Status: Running — waiting for clients...")
-        print("=" * 40)
+        print("=" * 50)
+        print(f"  Bind host : {self.host}")
+        print(f"  Bind port : {self.port}")
+        print(f"  Railway?  : {'YES' if os.environ.get('RAILWAY_ENVIRONMENT') else 'NO (local)'}")
+        print("  Status    : Running — waiting for clients...")
+        print("=" * 50)
 
         while True:
             try:
                 client_socket, client_address = self.server_socket.accept()
 
+                # Enable keep-alive on each accepted socket too
+                client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
                 with self.clients_lock:
                     self.clients.append(client_socket)
 
-                print(f"[+] Client connected    -> {client_address}  |  total: {len(self.clients)}")
+                count = len(self.clients)
+                print(f"[+] Client connected    -> {client_address}  |  total: {count}")
 
                 thread = threading.Thread(
                     target=self.handle_client,
                     args=(client_socket, client_address),
-                    daemon=True
+                    daemon=True,
                 )
                 thread.start()
 
@@ -72,6 +83,7 @@ class ChatServer:
                 chunk = client_socket.recv(65536)
 
                 if not chunk:
+                    print(f"[~] Clean disconnect from {client_address}")
                     break
 
                 buffer += chunk
@@ -86,6 +98,10 @@ class ChatServer:
 
             except ConnectionResetError:
                 print(f"[!] Connection reset by {client_address}")
+                break
+            except OSError as e:
+                # Socket was closed from our side (e.g. during shutdown)
+                print(f"[!] OSError with {client_address}: {e}")
                 break
             except Exception as e:
                 print(f"[!] Error with {client_address}: {e}")
@@ -115,17 +131,21 @@ class ChatServer:
 
             end = buffer.find(close_tag)
             if end == -1:
-                return None, buffer   # Packet started but not finished
+                return None, buffer   # Packet started but not finished yet
 
             end += len(close_tag)
             return buffer[:end], buffer[end:]
 
         # Buffer starts with unknown bytes — discard until a known tag appears
+        earliest = len(buffer)
         for open_tag, _ in self.PACKET_PAIRS:
             idx = buffer.find(open_tag)
-            if idx > 0:
-                print(f"[!] Discarding {idx} stray bytes")
-                return None, buffer[idx:]
+            if 0 < idx < earliest:
+                earliest = idx
+
+        if earliest < len(buffer):
+            print(f"[!] Discarding {earliest} stray bytes before next packet tag")
+            return None, buffer[earliest:]
 
         return None, buffer
 
@@ -142,12 +162,12 @@ class ChatServer:
         for client in targets:
             try:
                 client.sendall(data)
-            except Exception:
+            except Exception as e:
+                print(f"[!] Broadcast failed to a client: {e}")
                 dead.append(client)
 
-        # Clean up any clients that failed during broadcast
         for client in dead:
-            self._remove_client(client, "unknown")
+            self._remove_client(client, "unknown (broadcast failure)")
 
     def _remove_client(self, client_socket, client_address):
         with self.clients_lock:

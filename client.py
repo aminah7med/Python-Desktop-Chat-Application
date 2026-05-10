@@ -1,6 +1,7 @@
 import os
 import socket
 import threading
+import time
 
 from protocol import PacketBuilder, PacketParser
 
@@ -10,8 +11,12 @@ class ChatClient:
     TCP chat client.
 
     Supports two modes:
-      - Local  : host="127.0.0.1", port=5000  (default)
-      - Hosted : host="your-app.railway.app",  port=<Railway port>
+      - Local  : host="127.0.0.1",                port=5000   (default)
+      - Online : host="<Railway TCP proxy host>",  port=<Railway TCP proxy port>
+
+    IMPORTANT — Railway exposes TWO kinds of URLs for a service:
+      1. HTTPS domain  (e.g. web-production-xxx.up.railway.app)  — HTTP only, NOT usable here
+      2. TCP Proxy     (e.g. roundhouse.proxy.rlwy.net : 12345)  — raw TCP, use THIS one
 
     Callbacks (all optional, set by the UI layer):
       on_message(text: str)
@@ -22,8 +27,11 @@ class ChatClient:
       on_disconnect()
     """
 
-    # File extensions that are routed to on_video() instead of on_file()
+    # File extensions routed to on_video() instead of on_file()
     VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm"}
+
+    # How long to wait for the TCP handshake to complete
+    CONNECT_TIMEOUT = 15   # seconds — Railway proxy can be a bit slow on cold starts
 
     def __init__(
         self,
@@ -50,19 +58,49 @@ class ChatClient:
         self.running       = False
         self.buffer        = b""
 
+        # Guards against on_disconnect being called more than once per session
+        self._disconnect_called = False
+        self._lock = threading.Lock()
+
     # ------------------------------------------------------------------ #
     #  Connection                                                          #
     # ------------------------------------------------------------------ #
 
     def connect(self):
-        """Connect to server and start the receive thread."""
-        try:
-            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.client_socket.settimeout(10)           # Connection timeout
-            self.client_socket.connect((self.host, self.port))
-            self.client_socket.settimeout(None)         # Back to blocking mode
-            self.running = True
+        """
+        Resolve host, open TCP connection, start receive thread.
 
+        Returns True on success, False on failure.
+        The caller can check the return value to show a UI error.
+        """
+        self._disconnect_called = False
+        self.buffer = b""
+
+        try:
+            # --- Resolve host to IP (gives a clearer error than the raw socket) ---
+            print(f"[Client] Resolving {self.host} ...")
+            try:
+                ip = socket.gethostbyname(self.host)
+                print(f"[Client] Resolved to {ip}")
+            except socket.gaierror as e:
+                print(
+                    f"[Client] DNS resolution failed for '{self.host}': {e}\n"
+                    f"         Make sure you are using the Railway TCP Proxy host,\n"
+                    f"         NOT the HTTPS domain (web-production-xxx.up.railway.app)."
+                )
+                return False
+
+            # --- Open socket ---
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+            # Keep-alive so the Railway proxy doesn't drop idle connections
+            self.client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+            self.client_socket.settimeout(self.CONNECT_TIMEOUT)
+            self.client_socket.connect((self.host, self.port))
+            self.client_socket.settimeout(None)   # Back to blocking mode for recv
+
+            self.running = True
             print(f"[Client] Connected to {self.host}:{self.port}")
 
             if self.on_connect:
@@ -70,27 +108,47 @@ class ChatClient:
 
             t = threading.Thread(target=self._receive_loop, daemon=True)
             t.start()
+            return True
 
         except ConnectionRefusedError:
-            print(f"[Client] Connection refused — is the server running on {self.host}:{self.port}?")
+            print(
+                f"[Client] Connection refused ({self.host}:{self.port}).\n"
+                f"         Local mode: is server.py running?\n"
+                f"         Online mode: did you add a TCP Proxy in Railway Settings → Networking?"
+            )
         except socket.timeout:
-            print(f"[Client] Connection timed out — check host/port.")
+            print(
+                f"[Client] Connection timed out after {self.CONNECT_TIMEOUT}s.\n"
+                f"         Check host/port. Online: use TCP Proxy address, not HTTPS domain."
+            )
+        except OSError as e:
+            print(f"[Client] OS error during connect: {e}")
         except Exception as e:
             print(f"[Client] Connection failed: {e}")
 
+        return False
+
     def disconnect(self):
-        """Cleanly close the connection."""
+        """Cleanly close the connection. Safe to call multiple times."""
+        with self._lock:
+            if self._disconnect_called:
+                return
+            self._disconnect_called = True
+
         self.running = False
+
         try:
             if self.client_socket:
                 self.client_socket.close()
         except Exception:
             pass
+        finally:
+            self.client_socket = None
+
+        print("[Client] Disconnected.")
 
         if self.on_disconnect:
             self.on_disconnect()
-
-        print("[Client] Disconnected.")
 
     # ------------------------------------------------------------------ #
     #  Send methods                                                        #
@@ -125,11 +183,11 @@ class ChatClient:
             print(f"[Client] Send image failed: {e}")
 
     def send_video(self, file_path):
-        """Send a video file — runs in a background thread to keep UI responsive."""
+        """Send a video file — background thread keeps UI responsive."""
         threading.Thread(
             target=self._send_binary,
             args=(file_path,),
-            daemon=True
+            daemon=True,
         ).start()
 
     def send_file(self, file_path):
@@ -137,11 +195,11 @@ class ChatClient:
         threading.Thread(
             target=self._send_binary,
             args=(file_path,),
-            daemon=True
+            daemon=True,
         ).start()
 
     def _send_binary(self, file_path):
-        """Read a file from disk and send it as a FILE packet (used by both video and file)."""
+        """Read file from disk and send as a FILE packet."""
         try:
             filename = os.path.basename(file_path)
             with open(file_path, "rb") as f:
@@ -154,6 +212,9 @@ class ChatClient:
 
     def _send(self, packet):
         """Low-level send — catches broken pipe and similar errors."""
+        if not self.running or self.client_socket is None:
+            print("[Client] Cannot send — not connected.")
+            return
         try:
             self.client_socket.sendall(packet)
         except Exception as e:
@@ -178,6 +239,9 @@ class ChatClient:
 
             except ConnectionResetError:
                 print("[Client] Connection reset by server.")
+                break
+            except OSError:
+                # Socket closed from our side — normal during disconnect()
                 break
             except Exception as e:
                 if self.running:
@@ -207,7 +271,6 @@ class ChatClient:
             self.on_image(filename, packet["data"])
 
         elif ptype == "file":
-            # Route video files to on_video, everything else to on_file
             if ext in self.VIDEO_EXTENSIONS and self.on_video:
                 self.on_video(filename, packet["data"])
             elif self.on_file:
