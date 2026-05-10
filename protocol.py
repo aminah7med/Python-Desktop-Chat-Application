@@ -2,26 +2,34 @@ import base64
 
 
 class PacketBuilder:
+    """Builds packets for text, image, and file transfer."""
 
     @staticmethod
     def build_text(message):
+        """<TEXT>hello</TEXT>"""
         return f"<TEXT>{message}</TEXT>".encode()
 
     @staticmethod
     def build_image(filename, data):
-        # base64-encode binary so closing tag never appears inside payload
+        """
+        <IMAGE>photo.jpg|<base64></IMAGE>
+        Binary data is base64-encoded so the closing tag never
+        appears inside the payload by accident.
+        """
         encoded = base64.b64encode(data).decode()
         return f"<IMAGE>{filename}|{encoded}</IMAGE>".encode()
 
     @staticmethod
     def build_file(filename, data):
+        """<FILE>video.mp4|<base64></FILE>"""
         encoded = base64.b64encode(data).decode()
         return f"<FILE>{filename}|{encoded}</FILE>".encode()
 
 
 class PacketParser:
+    """Parses packets from a live TCP byte buffer."""
 
-    # (packet_type, opening_tag, closing_tag)
+    # (type_name, opening_tag, closing_tag)
     TAGS = [
         ("text",  b"<TEXT>",  b"</TEXT>"),
         ("image", b"<IMAGE>", b"</IMAGE>"),
@@ -31,10 +39,16 @@ class PacketParser:
     @staticmethod
     def extract_one(buffer):
         """
-        Scan the buffer for the first complete packet.
-        Returns (packet_dict, remaining_buffer).
-        Returns (None, buffer) when no complete packet is found yet.
-        This is called repeatedly until None is returned.
+        Scan the buffer for the FIRST complete packet.
+
+        Returns:
+            (packet_dict, remaining_buffer)  — when a full packet is found
+            (None,        buffer)            — when no full packet yet
+
+        packet_dict keys:
+            type     : "text" | "image" | "file"
+            filename : str | None
+            data     : str (for text) | bytes (for image/file)
         """
         for ptype, open_tag, close_tag in PacketParser.TAGS:
             if not buffer.startswith(open_tag):
@@ -42,36 +56,60 @@ class PacketParser:
 
             end = buffer.find(close_tag)
             if end == -1:
-                # Packet has started but not finished yet — wait for more data
+                # Packet has started but hasn't finished arriving yet
                 return None, buffer
 
-            content = buffer[len(open_tag):end]
-            rest    = buffer[end + len(close_tag):]
+            content       = buffer[len(open_tag):end]
+            rest          = buffer[end + len(close_tag):]
 
-            if ptype == "text":
+            try:
+                if ptype == "text":
+                    return {
+                        "type":     "text",
+                        "filename": None,
+                        "data":     content.decode(errors="ignore")
+                    }, rest
+
+                # IMAGE or FILE — split on first "|"
+                sep_index = content.find(b"|")
+                if sep_index == -1:
+                    # Malformed packet — skip it
+                    print(f"[Protocol] Malformed {ptype} packet — no separator, skipping.")
+                    return None, rest
+
+                filename  = content[:sep_index].decode(errors="ignore")
+                raw_b64   = content[sep_index + 1:]
+                file_data = base64.b64decode(raw_b64)
+
                 return {
-                    "type":     "text",
-                    "filename": None,
-                    "data":     content.decode(errors="ignore")
+                    "type":     ptype,
+                    "filename": filename,
+                    "data":     file_data
                 }, rest
 
-            # IMAGE or FILE: split on first "|"
-            sep      = content.find(b"|")
-            filename = content[:sep].decode()
-            raw_data = base64.b64decode(content[sep + 1:])
+            except Exception as e:
+                print(f"[Protocol] Parse error ({ptype}): {e} — skipping packet.")
+                return None, rest
 
-            return {
-                "type":     ptype,
-                "filename": filename,
-                "data":     raw_data
-            }, rest
+        # Buffer doesn't start with any known tag.
+        # Discard bytes until the next known opening tag.
+        earliest = len(buffer)
+        for _, open_tag, _ in PacketParser.TAGS:
+            idx = buffer.find(open_tag)
+            if 0 < idx < earliest:
+                earliest = idx
 
-        # Buffer doesn't start with any known tag — discard until it does
-        # (handles stray bytes or partial corruption)
+        if earliest < len(buffer):
+            print(f"[Protocol] Discarding {earliest} unrecognised bytes.")
+            return None, buffer[earliest:]
+
         return None, buffer
 
     @staticmethod
     def parse(data):
-        """Convenience wrapper — parse a single self-contained packet."""
+        """
+        Convenience wrapper — parse a single self-contained packet.
+        Used when you already have exactly one packet in `data`.
+        """
         packet, _ = PacketParser.extract_one(data)
         return packet

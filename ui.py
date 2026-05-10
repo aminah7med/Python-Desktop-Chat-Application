@@ -3,40 +3,136 @@ import os
 import sys
 import subprocess
 import tkinter as tk
-from tkinter import filedialog, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext
 from datetime import datetime
 
 from PIL import Image, ImageTk
 
 from client import ChatClient
 
-# Video extensions — same set as client.py
+# File extensions treated as video
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm"}
 
 
-class ChatUI:
+# ====================================================================== #
+#  Connection dialog — shown before the main chat window                 #
+# ====================================================================== #
+
+class ConnectDialog:
+    """
+    Small popup that asks the user for server host and port.
+    Supports local mode (127.0.0.1) and hosted Railway mode.
+    """
+
     def __init__(self):
+        self.host   = None
+        self.port   = None
+        self.result = False   # True if user clicked Connect
+
         self.window = tk.Tk()
-        self.window.title("Chat Application")
+        self.window.title("Connect to Server")
+        self.window.geometry("360x280")
+        self.window.configure(bg="#075e54")
+        self.window.resizable(False, False)
+        self.window.eval("tk::PlaceWindow . center")
+
+        self._build()
+
+    def _build(self):
+        tk.Label(
+            self.window, text="💬 Python Chat",
+            font=("Arial", 18, "bold"),
+            fg="white", bg="#075e54"
+        ).pack(pady=(24, 4))
+
+        tk.Label(
+            self.window, text="Connect to server",
+            font=("Arial", 10), fg="#b2dfdb", bg="#075e54"
+        ).pack()
+
+        form = tk.Frame(self.window, bg="#075e54")
+        form.pack(pady=18, padx=30, fill="x")
+
+        # Host
+        tk.Label(form, text="Host:", fg="white", bg="#075e54",
+                 font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=4)
+        self.host_entry = tk.Entry(form, font=("Arial", 11), width=26)
+        self.host_entry.insert(0, "127.0.0.1")
+        self.host_entry.grid(row=0, column=1, padx=(10, 0))
+
+        # Port
+        tk.Label(form, text="Port:", fg="white", bg="#075e54",
+                 font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=4)
+        self.port_entry = tk.Entry(form, font=("Arial", 11), width=26)
+        self.port_entry.insert(0, "5000")
+        self.port_entry.grid(row=1, column=1, padx=(10, 0))
+
+        tk.Button(
+            self.window,
+            text="Connect",
+            bg="#25d366", fg="white",
+            font=("Arial", 12, "bold"),
+            relief="flat", cursor="hand2",
+            command=self._on_connect
+        ).pack(pady=(4, 0), ipadx=20, ipady=6)
+
+        self.window.bind("<Return>", lambda e: self._on_connect())
+
+    def _on_connect(self):
+        host = self.host_entry.get().strip()
+        port_str = self.port_entry.get().strip()
+
+        if not host:
+            messagebox.showwarning("Input Error", "Please enter a host.", parent=self.window)
+            return
+        try:
+            port = int(port_str)
+        except ValueError:
+            messagebox.showwarning("Input Error", "Port must be a number.", parent=self.window)
+            return
+
+        self.host   = host
+        self.port   = port
+        self.result = True
+        self.window.destroy()
+
+    def show(self):
+        self.window.mainloop()
+        return self.result
+
+
+# ====================================================================== #
+#  Main chat window                                                       #
+# ====================================================================== #
+
+class ChatUI:
+    def __init__(self, host="127.0.0.1", port=5000):
+        self.window = tk.Tk()
+        self.window.title("Python Chat")
         self.window.geometry("520x740")
         self.window.configure(bg="#ece5dd")
         self.window.resizable(False, False)
 
-        self.hd_mode = tk.BooleanVar(value=False)
-        self._photo_refs = []
+        self.hd_mode     = tk.BooleanVar(value=False)
+        self._photo_refs = []   # Prevent Tkinter GC from deleting images
 
         self.client = ChatClient(
-            on_message=self.receive_message,
-            on_image=self.receive_image,
-            on_file=self.receive_file,
-            on_video=self.receive_video,
+            host=host,
+            port=port,
+            on_message    = self.receive_message,
+            on_image      = self.receive_image,
+            on_file       = self.receive_file,
+            on_video      = self.receive_video,
+            on_connect    = self._on_connect,
+            on_disconnect = self._on_disconnect,
         )
         self.client.connect()
 
         self._build_ui()
+        self.window.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------ #
-    #  UI construction                                                     #
+    #  Build UI                                                            #
     # ------------------------------------------------------------------ #
 
     def _build_ui(self):
@@ -46,7 +142,7 @@ class ChatUI:
         self._build_input_row()
 
     def _build_header(self):
-        header = tk.Frame(self.window, bg="#075e54", height=60)
+        header = tk.Frame(self.window, bg="#075e54", height=58)
         header.pack(fill="x")
         header.pack_propagate(False)
 
@@ -54,11 +150,11 @@ class ChatUI:
             header, text="💬  Python Chat",
             fg="white", bg="#075e54",
             font=("Arial", 15, "bold")
-        ).pack(side="left", padx=15, pady=12)
+        ).pack(side="left", padx=14, pady=10)
 
+        # HD Image toggle in the header (like WhatsApp quality switch)
         tk.Checkbutton(
-            header,
-            text="HD Image",
+            header, text="HD Image",
             variable=self.hd_mode,
             fg="white", bg="#075e54",
             selectcolor="#128c7e",
@@ -79,56 +175,76 @@ class ChatUI:
         )
         self.chat_area.pack(fill="both", expand=True)
 
+        # ---- Tag styles ---- #
+
+        # Sent (right-aligned green bubble)
         self.chat_area.tag_config(
             "me",
             justify="right",
-            foreground="#1a1a1a", background="#dcf8c6",
-            lmargin1=90, lmargin2=90, rmargin=10,
+            foreground="#1a1a1a",
+            background="#dcf8c6",
+            lmargin1=80, lmargin2=80,
+            rmargin=8,
             spacing1=2, spacing3=2,
         )
+
+        # Received (left-aligned white bubble)
         self.chat_area.tag_config(
             "friend",
             justify="left",
-            foreground="#1a1a1a", background="#ffffff",
-            lmargin1=10, lmargin2=10, rmargin=90,
+            foreground="#1a1a1a",
+            background="#ffffff",
+            lmargin1=8, lmargin2=8,
+            rmargin=80,
             spacing1=2, spacing3=2,
         )
+
+        # Timestamp under each bubble
         self.chat_area.tag_config(
             "ts_me",
-            justify="right", foreground="#888888",
-            font=("Arial", 8), rmargin=12, spacing3=6,
+            justify="right",
+            foreground="#999999",
+            font=("Arial", 8),
+            rmargin=10,
+            spacing3=7,
         )
         self.chat_area.tag_config(
             "ts_friend",
-            justify="left", foreground="#888888",
-            font=("Arial", 8), lmargin1=12, spacing3=6,
+            justify="left",
+            foreground="#999999",
+            font=("Arial", 8),
+            lmargin1=10,
+            spacing3=7,
         )
+
+        # Centre grey line (system / status messages)
         self.chat_area.tag_config(
             "system",
-            justify="center", foreground="#888888",
+            justify="center",
+            foreground="#888888",
             font=("Arial", 9, "italic"),
-            spacing1=3, spacing3=3,
+            spacing1=4, spacing3=4,
         )
 
     def _build_toolbar(self):
-        toolbar = tk.Frame(self.window, bg="#f0f0f0", pady=4)
-        toolbar.pack(fill="x", padx=10)
+        bar = tk.Frame(self.window, bg="#f0f0f0", pady=5)
+        bar.pack(fill="x", padx=10)
 
-        btn_cfg = dict(
-            font=("Arial", 10), relief="groove",
-            cursor="hand2", padx=8, pady=2,
-            bg="#ffffff", fg="#075e54"
+        btn = dict(
+            font=("Arial", 10),
+            relief="groove",
+            cursor="hand2",
+            bg="#ffffff",
+            fg="#075e54",
+            padx=8, pady=2,
         )
 
-        tk.Button(toolbar, text="🖼  Image",
-                  command=self.send_image, **btn_cfg).pack(side="left", padx=(0, 6))
-
-        # ✅ Video button — clearly visible
-        tk.Button(toolbar, text="🎥  Video",
-                  command=self.send_video, **btn_cfg).pack(side="left", padx=(0, 6))
-
-        tk.Button(toolbar, text="📎  File",
-                  command=self.send_file, **btn_cfg).pack(side="left")
+        tk.Button(bar, text="🖼  Image",
+                  command=self.send_image, **btn).pack(side="left", padx=(0, 6))
+        tk.Button(bar, text="🎥  Video",
+                  command=self.send_video, **btn).pack(side="left", padx=(0, 6))
+        tk.Button(bar, text="📎  File",
+                  command=self.send_file,  **btn).pack(side="left")
 
     def _build_input_row(self):
         row = tk.Frame(self.window, bg="#f0f0f0")
@@ -137,6 +253,7 @@ class ChatUI:
         self.entry = tk.Entry(row, font=("Arial", 12), relief="solid", bd=1)
         self.entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=6)
         self.entry.bind("<Return>", self.send_message)
+        self.entry.focus()
 
         tk.Button(
             row, text="Send",
@@ -150,92 +267,84 @@ class ChatUI:
     #  Bubble helpers                                                      #
     # ------------------------------------------------------------------ #
 
-    def _now(self):
+    @staticmethod
+    def _now():
         return datetime.now().strftime("%H:%M")
 
-    def _add_text_bubble(self, sender, text):
-        tag    = "me"    if sender == "me" else "friend"
-        ts_tag = "ts_me" if sender == "me" else "ts_friend"
-        label  = "You"   if sender == "me" else "Friend"
-
+    def _text_bubble(self, sender, text):
+        tag, ts, label = self._tags(sender)
         self.chat_area.config(state="normal")
         self.chat_area.insert(tk.END, f" {label}: {text} \n", tag)
-        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts_tag)
+        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts)
         self.chat_area.config(state="disabled")
         self.chat_area.yview(tk.END)
 
-    def _add_image_bubble(self, sender, img_bytes, filename):
-        tag    = "me"    if sender == "me" else "friend"
-        ts_tag = "ts_me" if sender == "me" else "ts_friend"
-        label  = "You"   if sender == "me" else "Friend"
-
+    def _image_bubble(self, sender, img_bytes, filename):
+        tag, ts, label = self._tags(sender)
         self.chat_area.config(state="normal")
         try:
-            image = Image.open(io.BytesIO(img_bytes))
-            image.thumbnail((260, 260))
-            photo = ImageTk.PhotoImage(image)
+            img = Image.open(io.BytesIO(img_bytes))
+            img.thumbnail((260, 260))
+            photo = ImageTk.PhotoImage(img)
             self._photo_refs.append(photo)
             self.chat_area.insert(tk.END, f" {label} 📷 {filename}\n", tag)
             self.chat_area.image_create(tk.END, image=photo)
             self.chat_area.insert(tk.END, "\n")
         except Exception:
-            self.chat_area.insert(tk.END, f" {label}: [Image: {filename}] \n", tag)
-
-        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts_tag)
+            self.chat_area.insert(tk.END, f" {label}: [Image – {filename}] \n", tag)
+        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts)
         self.chat_area.config(state="disabled")
         self.chat_area.yview(tk.END)
 
-    def _add_video_bubble(self, sender, filename, saved_path=None):
-        """
-        Video bubble — always shows the filename + thumbnail icon.
-        If saved_path is given (received video), shows a ▶ Play button.
-        """
-        tag    = "me"    if sender == "me" else "friend"
-        ts_tag = "ts_me" if sender == "me" else "ts_friend"
-        label  = "You"   if sender == "me" else "Friend"
-
+    def _video_bubble(self, sender, filename, saved_path=None):
+        tag, ts, label = self._tags(sender)
         self.chat_area.config(state="normal")
         self.chat_area.insert(tk.END, f" {label} 🎥 {filename}\n", tag)
 
         if saved_path:
-            play_btn = tk.Button(
+            btn = tk.Button(
                 self.chat_area,
                 text="  ▶  Play Video  ",
                 bg="#075e54", fg="white",
                 font=("Arial", 10, "bold"),
                 relief="flat", cursor="hand2",
-                command=lambda p=saved_path: self._open_video(p)
+                command=lambda p=saved_path: self._open_video(p),
             )
-            self.chat_area.window_create(tk.END, window=play_btn)
+            self.chat_area.window_create(tk.END, window=btn)
             self.chat_area.insert(tk.END, "\n")
 
-        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts_tag)
+        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts)
         self.chat_area.config(state="disabled")
         self.chat_area.yview(tk.END)
 
-    def _add_file_bubble(self, sender, filename, saved=False):
-        tag    = "me"    if sender == "me" else "friend"
-        ts_tag = "ts_me" if sender == "me" else "ts_friend"
-        label  = "You"   if sender == "me" else "Friend"
-        note   = "  ✔ saved to received/" if saved else ""
-
+    def _file_bubble(self, sender, filename, saved=False):
+        tag, ts, label = self._tags(sender)
+        note = "  ✔ saved to received/" if saved else ""
         self.chat_area.config(state="normal")
         self.chat_area.insert(tk.END, f" {label}: 📎 {filename}{note} \n", tag)
-        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts_tag)
+        self.chat_area.insert(tk.END, f"  {self._now()}\n", ts)
         self.chat_area.config(state="disabled")
         self.chat_area.yview(tk.END)
 
-    def _add_system(self, text):
+    def _system_msg(self, text):
         self.chat_area.config(state="normal")
         self.chat_area.insert(tk.END, f"{text}\n", "system")
         self.chat_area.config(state="disabled")
         self.chat_area.yview(tk.END)
 
+    @staticmethod
+    def _tags(sender):
+        """Return (bubble_tag, timestamp_tag, label) for a given sender."""
+        if sender == "me":
+            return "me", "ts_me", "You"
+        return "friend", "ts_friend", "Friend"
+
     # ------------------------------------------------------------------ #
-    #  Open video in system default player                                #
+    #  Open video in system default media player                          #
     # ------------------------------------------------------------------ #
 
-    def _open_video(self, path):
+    @staticmethod
+    def _open_video(path):
         try:
             abs_path = os.path.abspath(path)
             if sys.platform == "win32":
@@ -245,7 +354,7 @@ class ChatUI:
             else:
                 subprocess.Popen(["xdg-open", abs_path])
         except Exception as e:
-            print("Could not open video:", e)
+            print(f"[UI] Could not open video: {e}")
 
     # ------------------------------------------------------------------ #
     #  Send actions                                                        #
@@ -255,7 +364,7 @@ class ChatUI:
         text = self.entry.get().strip()
         if not text:
             return
-        self._add_text_bubble("me", text)
+        self._text_bubble("me", text)
         self.client.send_text(text)
         self.entry.delete(0, tk.END)
 
@@ -267,9 +376,9 @@ class ChatUI:
         if not path:
             return
         hd = self.hd_mode.get()
-        self._add_system(f"Sending image ({'HD' if hd else 'Compressed'})…")
+        self._system_msg(f"Sending image ({'HD' if hd else 'Compressed'})…")
         with open(path, "rb") as f:
-            self._add_image_bubble("me", f.read(), os.path.basename(path))
+            self._image_bubble("me", f.read(), os.path.basename(path))
         self.client.send_image(path, hd=hd)
 
     def send_video(self):
@@ -284,9 +393,9 @@ class ChatUI:
             return
         filename = os.path.basename(path)
         size_mb  = os.path.getsize(path) / (1024 * 1024)
-        self._add_system(f"Sending video: {filename}  ({size_mb:.1f} MB)…")
-        self._add_video_bubble("me", filename)   # sender: no Play button
-        self.client.send_video(path)             # runs in background thread
+        self._system_msg(f"Sending video: {filename}  ({size_mb:.1f} MB)…")
+        self._video_bubble("me", filename)
+        self.client.send_video(path)
 
     def send_file(self):
         path = filedialog.askopenfilename(
@@ -296,63 +405,71 @@ class ChatUI:
         if not path:
             return
         filename = os.path.basename(path)
+        ext      = os.path.splitext(filename)[1].lower()
 
-        # ✅ Safety net: if user accidentally picks a video via File button,
-        # still treat it as a video on the sender side
-        ext = os.path.splitext(filename)[1].lower()
+        # Safety net: if user picks a video through the File dialog, treat it correctly
         if ext in VIDEO_EXTENSIONS:
             size_mb = os.path.getsize(path) / (1024 * 1024)
-            self._add_system(f"Sending video: {filename}  ({size_mb:.1f} MB)…")
-            self._add_video_bubble("me", filename)
+            self._system_msg(f"Sending video: {filename}  ({size_mb:.1f} MB)…")
+            self._video_bubble("me", filename)
             self.client.send_video(path)
         else:
-            self._add_system(f"Sending file: {filename}…")
-            self._add_file_bubble("me", filename)
+            self._system_msg(f"Sending file: {filename}…")
+            self._file_bubble("me", filename)
             self.client.send_file(path)
 
     # ------------------------------------------------------------------ #
-    #  Receive callbacks (background thread → UI thread via .after)       #
+    #  Receive callbacks — always called from background thread           #
+    #  → use window.after() to safely update the Tkinter UI              #
     # ------------------------------------------------------------------ #
 
     def receive_message(self, text):
-        self.window.after(0, lambda: self._add_text_bubble("friend", text))
+        self.window.after(0, lambda: self._text_bubble("friend", text))
 
     def receive_image(self, filename, data):
         os.makedirs("received", exist_ok=True)
         with open(os.path.join("received", filename), "wb") as f:
             f.write(data)
-        self.window.after(0, lambda: self._add_image_bubble("friend", data, filename))
+        self.window.after(0, lambda: self._image_bubble("friend", data, filename))
 
     def receive_video(self, filename, data):
-        """Save the video then show a Play bubble."""
         os.makedirs("received", exist_ok=True)
         save_path = os.path.join("received", filename)
         with open(save_path, "wb") as f:
             f.write(data)
-        # ✅ Pass saved_path so the Play button knows where to find the file
         self.window.after(
             0,
-            lambda sp=save_path, fn=filename: self._add_video_bubble("friend", fn, saved_path=sp)
+            lambda sp=save_path, fn=filename: self._video_bubble("friend", fn, saved_path=sp)
         )
 
     def receive_file(self, filename, data):
-        """
-        Generic file receive.
-        ✅ Safety net: if filename has a video extension, show video bubble anyway.
-        """
         os.makedirs("received", exist_ok=True)
         save_path = os.path.join("received", filename)
         with open(save_path, "wb") as f:
             f.write(data)
-
         ext = os.path.splitext(filename)[1].lower()
         if ext in VIDEO_EXTENSIONS:
+            # Safety net: video that arrived via FILE packet still gets Play button
             self.window.after(
                 0,
-                lambda sp=save_path, fn=filename: self._add_video_bubble("friend", fn, saved_path=sp)
+                lambda sp=save_path, fn=filename: self._video_bubble("friend", fn, saved_path=sp)
             )
         else:
-            self.window.after(0, lambda: self._add_file_bubble("friend", filename, saved=True))
+            self.window.after(0, lambda: self._file_bubble("friend", filename, saved=True))
+
+    # ------------------------------------------------------------------ #
+    #  Connection state callbacks                                          #
+    # ------------------------------------------------------------------ #
+
+    def _on_connect(self):
+        self.window.after(0, lambda: self._system_msg("✅ Connected to server"))
+
+    def _on_disconnect(self):
+        self.window.after(0, lambda: self._system_msg("❌ Disconnected from server"))
+
+    def _on_close(self):
+        self.client.disconnect()
+        self.window.destroy()
 
     # ------------------------------------------------------------------ #
 
@@ -360,6 +477,12 @@ class ChatUI:
         self.window.mainloop()
 
 
+# ====================================================================== #
+#  Entry point                                                            #
+# ====================================================================== #
+
 if __name__ == "__main__":
-    app = ChatUI()
-    app.run()
+    dialog = ConnectDialog()
+    if dialog.show():
+        app = ChatUI(host=dialog.host, port=dialog.port)
+        app.run()

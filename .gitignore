@@ -1,5 +1,23 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Project temp folders
 temp/
 received/
+
+# IDE
 .vscode/
+.idea/
+*.suo
+*.user
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
