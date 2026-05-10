@@ -8,36 +8,24 @@ from datetime import datetime
 
 from PIL import Image, ImageTk
 
-from client import ChatClient
+from client import ChatClient, ONLINE_HOST, ONLINE_PORT
 
-# File extensions treated as video
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm"}
 
 
 # ====================================================================== #
-#  Connection dialog — shown before the main chat window                 #
+#  Connection dialog                                                      #
 # ====================================================================== #
 
 class ConnectDialog:
-    """
-    Popup that asks the user for server host and port.
-
-    Local mode  : 127.0.0.1  /  5000
-    Online mode : <Railway TCP Proxy host>  /  <Railway TCP Proxy port>
-
-    NOTE: The Railway *HTTPS* domain (web-production-xxx.up.railway.app)
-          does NOT work here. You must use the TCP Proxy address from:
-          Railway project → Settings → Networking → TCP Proxy
-    """
-
     def __init__(self):
         self.host   = None
         self.port   = None
-        self.result = False   # True if user clicked Connect
+        self.result = False
 
         self.window = tk.Tk()
         self.window.title("Connect to Server")
-        self.window.geometry("400x320")
+        self.window.geometry("380x300")
         self.window.configure(bg="#075e54")
         self.window.resizable(False, False)
         self.window.eval("tk::PlaceWindow . center")
@@ -49,7 +37,7 @@ class ConnectDialog:
             self.window, text="💬 Python Chat",
             font=("Arial", 18, "bold"),
             fg="white", bg="#075e54",
-        ).pack(pady=(20, 2))
+        ).pack(pady=(22, 2))
 
         tk.Label(
             self.window, text="Connect to server",
@@ -57,30 +45,26 @@ class ConnectDialog:
         ).pack()
 
         form = tk.Frame(self.window, bg="#075e54")
-        form.pack(pady=14, padx=30, fill="x")
+        form.pack(pady=16, padx=30, fill="x")
 
-        # Host row
         tk.Label(form, text="Host:", fg="white", bg="#075e54",
                  font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=5)
         self.host_entry = tk.Entry(form, font=("Arial", 11), width=28)
-        self.host_entry.insert(0, "127.0.0.1")
+        self.host_entry.insert(0, ONLINE_HOST)
         self.host_entry.grid(row=0, column=1, padx=(10, 0))
 
-        # Port row
         tk.Label(form, text="Port:", fg="white", bg="#075e54",
                  font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
         self.port_entry = tk.Entry(form, font=("Arial", 11), width=28)
-        self.port_entry.insert(0, "5000")
+        self.port_entry.insert(0, str(ONLINE_PORT))
         self.port_entry.grid(row=1, column=1, padx=(10, 0))
 
-        # Hint label
         tk.Label(
             self.window,
-            text="Online? Use Railway TCP Proxy host & port\n(NOT the https://... domain)",
+            text="Local mode: use  127.0.0.1 / 5000",
             font=("Arial", 8, "italic"),
             fg="#80cbc4", bg="#075e54",
-            justify="center",
-        ).pack(pady=(0, 8))
+        ).pack(pady=(0, 10))
 
         tk.Button(
             self.window,
@@ -89,7 +73,7 @@ class ConnectDialog:
             font=("Arial", 12, "bold"),
             relief="flat", cursor="hand2",
             command=self._on_connect,
-        ).pack(pady=(0, 0), ipadx=20, ipady=6)
+        ).pack(ipadx=20, ipady=6)
 
         self.window.bind("<Return>", lambda e: self._on_connect())
 
@@ -100,21 +84,21 @@ class ConnectDialog:
         if not host:
             messagebox.showwarning("Input Error", "Please enter a host.", parent=self.window)
             return
+
+        if host.startswith("http://") or host.startswith("https://"):
+            messagebox.showerror(
+                "Wrong Address",
+                "Don't use an HTTP/HTTPS URL here.\n\n"
+                "Go to Railway → Settings → Networking → TCP Proxy\n"
+                "and use that host and port.",
+                parent=self.window,
+            )
+            return
+
         try:
             port = int(port_str)
         except ValueError:
             messagebox.showwarning("Input Error", "Port must be a number.", parent=self.window)
-            return
-
-        # Warn if user accidentally pastes the HTTPS Railway domain
-        if host.startswith("http://") or host.startswith("https://"):
-            messagebox.showerror(
-                "Wrong Address",
-                "Do not use the HTTP/HTTPS URL here.\n\n"
-                "Go to Railway → your project → Settings → Networking → TCP Proxy\n"
-                "and use that host and port instead.",
-                parent=self.window,
-            )
             return
 
         self.host   = host
@@ -132,15 +116,15 @@ class ConnectDialog:
 # ====================================================================== #
 
 class ChatUI:
-    def __init__(self, host="127.0.0.1", port=5000):
+    def __init__(self, host=ONLINE_HOST, port=ONLINE_PORT):
         self.window = tk.Tk()
         self.window.title("Python Chat")
-        self.window.geometry("520x740")
+        self.window.geometry("520x760")
         self.window.configure(bg="#ece5dd")
         self.window.resizable(False, False)
 
         self.hd_mode     = tk.BooleanVar(value=False)
-        self._photo_refs = []   # Prevent Tkinter GC from deleting images
+        self._photo_refs = []
 
         self.client = ChatClient(
             host=host,
@@ -156,20 +140,17 @@ class ChatUI:
         self._build_ui()
         self.window.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Connect after the window is fully built so status messages appear
+        # Connect after window is drawn so status messages appear
         self.window.after(100, self._do_connect)
 
     def _do_connect(self):
-        """Attempt connection and show a popup if it fails."""
         ok = self.client.connect()
         if not ok:
             messagebox.showerror(
                 "Connection Failed",
-                f"Could not connect to {self.client.host}:{self.client.port}.\n\n"
-                "Local mode  → make sure server.py is running.\n"
-                "Online mode → use the Railway TCP Proxy host & port\n"
-                "              (Settings → Networking → TCP Proxy),\n"
-                "              NOT the https://... domain.",
+                f"Could not connect to:\n{self.client.host}:{self.client.port}\n\n"
+                "• Local mode  → make sure server.py is running\n"
+                "• Online mode → check Railway TCP Proxy host & port",
             )
 
     # ------------------------------------------------------------------ #
@@ -178,12 +159,13 @@ class ChatUI:
 
     def _build_ui(self):
         self._build_header()
+        self._build_status_bar()
         self._build_chat_area()
         self._build_toolbar()
         self._build_input_row()
 
     def _build_header(self):
-        header = tk.Frame(self.window, bg="#075e54", height=58)
+        header = tk.Frame(self.window, bg="#075e54", height=56)
         header.pack(fill="x")
         header.pack_propagate(False)
 
@@ -193,7 +175,6 @@ class ChatUI:
             font=("Arial", 15, "bold"),
         ).pack(side="left", padx=14, pady=10)
 
-        # HD Image toggle (like WhatsApp quality switch)
         tk.Checkbutton(
             header, text="HD Image",
             variable=self.hd_mode,
@@ -203,6 +184,22 @@ class ChatUI:
             activebackground="#075e54",
             font=("Arial", 10),
         ).pack(side="right", padx=12)
+
+    def _build_status_bar(self):
+        """Thin bar below the header showing connection state."""
+        self.status_bar = tk.Label(
+            self.window,
+            text="⏳ Connecting...",
+            font=("Arial", 9),
+            fg="#555555",
+            bg="#dce0e3",
+            anchor="w",
+            padx=10,
+        )
+        self.status_bar.pack(fill="x")
+
+    def _set_status(self, text, color="#555555"):
+        self.status_bar.config(text=text, fg=color)
 
     def _build_chat_area(self):
         self.chat_area = scrolledtext.ScrolledText(
@@ -216,7 +213,6 @@ class ChatUI:
         )
         self.chat_area.pack(fill="both", expand=True)
 
-        # Sent (right-aligned green bubble)
         self.chat_area.tag_config(
             "me",
             justify="right",
@@ -226,8 +222,6 @@ class ChatUI:
             rmargin=8,
             spacing1=2, spacing3=2,
         )
-
-        # Received (left-aligned white bubble)
         self.chat_area.tag_config(
             "friend",
             justify="left",
@@ -237,8 +231,6 @@ class ChatUI:
             rmargin=80,
             spacing1=2, spacing3=2,
         )
-
-        # Timestamp under each bubble
         self.chat_area.tag_config(
             "ts_me",
             justify="right",
@@ -255,8 +247,6 @@ class ChatUI:
             lmargin1=10,
             spacing3=7,
         )
-
-        # Centre grey system / status messages
         self.chat_area.tag_config(
             "system",
             justify="center",
@@ -270,20 +260,12 @@ class ChatUI:
         bar.pack(fill="x", padx=10)
 
         btn = dict(
-            font=("Arial", 10),
-            relief="groove",
-            cursor="hand2",
-            bg="#ffffff",
-            fg="#075e54",
-            padx=8, pady=2,
+            font=("Arial", 10), relief="groove", cursor="hand2",
+            bg="#ffffff", fg="#075e54", padx=8, pady=2,
         )
-
-        tk.Button(bar, text="🖼  Image",
-                  command=self.send_image, **btn).pack(side="left", padx=(0, 6))
-        tk.Button(bar, text="🎥  Video",
-                  command=self.send_video, **btn).pack(side="left", padx=(0, 6))
-        tk.Button(bar, text="📎  File",
-                  command=self.send_file,  **btn).pack(side="left")
+        tk.Button(bar, text="🖼  Image", command=self.send_image, **btn).pack(side="left", padx=(0, 6))
+        tk.Button(bar, text="🎥  Video", command=self.send_video, **btn).pack(side="left", padx=(0, 6))
+        tk.Button(bar, text="📎  File",  command=self.send_file,  **btn).pack(side="left")
 
     def _build_input_row(self):
         row = tk.Frame(self.window, bg="#f0f0f0")
@@ -339,7 +321,6 @@ class ChatUI:
         tag, ts, label = self._tags(sender)
         self.chat_area.config(state="normal")
         self.chat_area.insert(tk.END, f" {label} 🎥 {filename}\n", tag)
-
         if saved_path:
             btn = tk.Button(
                 self.chat_area,
@@ -351,7 +332,6 @@ class ChatUI:
             )
             self.chat_area.window_create(tk.END, window=btn)
             self.chat_area.insert(tk.END, "\n")
-
         self.chat_area.insert(tk.END, f"  {self._now()}\n", ts)
         self.chat_area.config(state="disabled")
         self.chat_area.yview(tk.END)
@@ -376,10 +356,6 @@ class ChatUI:
         if sender == "me":
             return "me", "ts_me", "You"
         return "friend", "ts_friend", "Friend"
-
-    # ------------------------------------------------------------------ #
-    #  Open video in system default media player                          #
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _open_video(path):
@@ -422,10 +398,7 @@ class ChatUI:
     def send_video(self):
         path = filedialog.askopenfilename(
             title="Select Video",
-            filetypes=[
-                ("Video files", "*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm"),
-                ("All files", "*.*"),
-            ],
+            filetypes=[("Video files", "*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm"), ("All files", "*.*")],
         )
         if not path:
             return
@@ -436,15 +409,11 @@ class ChatUI:
         self.client.send_video(path)
 
     def send_file(self):
-        path = filedialog.askopenfilename(
-            title="Select File",
-            filetypes=[("All files", "*.*")],
-        )
+        path = filedialog.askopenfilename(title="Select File", filetypes=[("All files", "*.*")])
         if not path:
             return
         filename = os.path.basename(path)
         ext      = os.path.splitext(filename)[1].lower()
-
         if ext in VIDEO_EXTENSIONS:
             size_mb = os.path.getsize(path) / (1024 * 1024)
             self._system_msg(f"Sending video: {filename}  ({size_mb:.1f} MB)…")
@@ -456,7 +425,7 @@ class ChatUI:
             self.client.send_file(path)
 
     # ------------------------------------------------------------------ #
-    #  Receive callbacks (called from background thread → use after())    #
+    #  Receive callbacks — always called from background thread           #
     # ------------------------------------------------------------------ #
 
     def receive_message(self, text):
@@ -473,10 +442,7 @@ class ChatUI:
         save_path = os.path.join("received", filename)
         with open(save_path, "wb") as f:
             f.write(data)
-        self.window.after(
-            0,
-            lambda sp=save_path, fn=filename: self._video_bubble("friend", fn, saved_path=sp),
-        )
+        self.window.after(0, lambda sp=save_path, fn=filename: self._video_bubble("friend", fn, saved_path=sp))
 
     def receive_file(self, filename, data):
         os.makedirs("received", exist_ok=True)
@@ -485,10 +451,7 @@ class ChatUI:
             f.write(data)
         ext = os.path.splitext(filename)[1].lower()
         if ext in VIDEO_EXTENSIONS:
-            self.window.after(
-                0,
-                lambda sp=save_path, fn=filename: self._video_bubble("friend", fn, saved_path=sp),
-            )
+            self.window.after(0, lambda sp=save_path, fn=filename: self._video_bubble("friend", fn, saved_path=sp))
         else:
             self.window.after(0, lambda: self._file_bubble("friend", filename, saved=True))
 
@@ -497,21 +460,20 @@ class ChatUI:
     # ------------------------------------------------------------------ #
 
     def _on_connect(self):
-        self.window.after(
-            0,
-            lambda: self._system_msg(
-                f"✅ Connected to {self.client.host}:{self.client.port}"
-            ),
-        )
+        self.window.after(0, lambda: (
+            self._set_status(f"🟢  Connected  —  {self.client.host}:{self.client.port}", "#1a7a3a"),
+            self._system_msg(f"✅ Connected to {self.client.host}:{self.client.port}"),
+        ))
 
     def _on_disconnect(self):
-        self.window.after(0, lambda: self._system_msg("❌ Disconnected from server"))
+        self.window.after(0, lambda: (
+            self._set_status("🔴  Disconnected", "#c0392b"),
+            self._system_msg("❌ Disconnected from server"),
+        ))
 
     def _on_close(self):
         self.client.disconnect()
         self.window.destroy()
-
-    # ------------------------------------------------------------------ #
 
     def run(self):
         self.window.mainloop()
